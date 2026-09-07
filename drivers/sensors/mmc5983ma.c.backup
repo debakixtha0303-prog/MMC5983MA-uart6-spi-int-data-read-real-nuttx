@@ -1,0 +1,468 @@
+/****************************************************************************
+ * boards/arm/stm32/f4/stm32f427-custom/src/mmc5983ma.c
+ *
+ * MMC5983MA Magnetometer Driver
+ *
+ ****************************************************************************/
+
+#include <nuttx/config.h>
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+#include <syslog.h>
+
+#include <nuttx/compiler.h>
+#include <nuttx/spi/spi.h>
+
+#include <nuttx/sensors/mmc5983ma.h>
+
+/****************************************************************************
+ * Private Functions
+ ****************************************************************************/
+
+int mmc5983ma_read_reg(FAR mmc5983ma_dev_t *dev,
+                       uint8_t reg,
+                       FAR uint8_t *val)
+{
+  uint8_t tx[2];
+  uint8_t rx[2];
+
+  if (dev == NULL || dev->spi == NULL || val == NULL)
+    {
+      return -EINVAL;
+    }
+
+  memset(tx, 0, sizeof(tx));
+  memset(rx, 0, sizeof(rx));
+
+  /* SPI read command: MSB = 1 */
+
+  tx[0] = reg | 0x80;
+  tx[1] = 0x00;
+
+  SPI_LOCK(dev->spi, true);
+
+  SPI_SETMODE(dev->spi, SPIDEV_MODE0);
+  SPI_SETFREQUENCY(dev->spi, 1000000);
+
+  SPI_SELECT(dev->spi, dev->dev_id, true);
+
+  SPI_EXCHANGE(dev->spi,
+               tx,
+               rx,
+               2);
+
+  SPI_SELECT(dev->spi,
+             dev->dev_id,
+             false);
+
+  SPI_LOCK(dev->spi, false);
+
+  *val = rx[1];
+
+  return 0;
+}
+
+/****************************************************************************
+ * Write register
+ ****************************************************************************/
+
+int mmc5983ma_write_reg(FAR mmc5983ma_dev_t *dev,
+                        uint8_t reg,
+                        uint8_t val)
+{
+  uint8_t tx[2];
+
+  if (dev == NULL || dev->spi == NULL)
+    {
+      return -EINVAL;
+    }
+
+  memset(tx, 0, sizeof(tx));
+
+  /* SPI write command: MSB = 0 */
+
+  tx[0] = reg & 0x7f;
+  tx[1] = val;
+
+  SPI_LOCK(dev->spi, true);
+
+  SPI_SETMODE(dev->spi, SPIDEV_MODE0);
+  SPI_SETFREQUENCY(dev->spi, 1000000);
+
+  SPI_SELECT(dev->spi,
+             dev->dev_id,
+             true);
+
+  SPI_EXCHANGE(dev->spi,
+               tx,
+               NULL,
+               2);
+
+  SPI_SELECT(dev->spi,
+             dev->dev_id,
+             false);
+
+  SPI_LOCK(dev->spi, false);
+
+  return 0;
+}
+
+/****************************************************************************
+ * Public Functions
+ ****************************************************************************/
+
+/****************************************************************************
+ * Initialize MMC5983MA
+ ****************************************************************************/
+
+int mmc5983ma_init(FAR mmc5983ma_dev_t *dev,
+                   FAR struct spi_dev_s *spi,
+                   int dev_id)
+{
+  uint8_t pid;
+  uint8_t ctrl0;
+  uint8_t ctrl3;
+  int ret;
+
+  if (dev == NULL || spi == NULL)
+    {
+      return -EINVAL;
+    }
+
+  dev->spi = spi;
+  dev->dev_id = dev_id;
+
+  syslog(LOG_INFO,
+         "[MMC5983MA] Starting initialization...\n");
+
+  /**************************************************************************
+   * Read Product ID
+   **************************************************************************/
+
+  ret = mmc5983ma_read_reg(dev,
+                           MMC5983MA_REG_PRODUCT_ID,
+                           &pid);
+
+  if (ret < 0)
+    {
+      syslog(LOG_ERR,
+             "[MMC5983MA] PRODUCT ID read failed: %d\n",
+             ret);
+
+      return ret;
+    }
+
+  syslog(LOG_INFO,
+         "[MMC5983MA] PRODUCT_ID = 0x%02X\n",
+         pid);
+
+  if (pid != MMC5983MA_PRODUCT_ID_VAL)
+    {
+      syslog(LOG_ERR,
+             "[MMC5983MA] WRONG PRODUCT ID! "
+             "Expected 0x%02X got 0x%02X\n",
+             MMC5983MA_PRODUCT_ID_VAL,
+             pid);
+
+      return -ENODEV;
+    }
+
+  /**************************************************************************
+   * Software reset
+   **************************************************************************/
+
+  ret = mmc5983ma_write_reg(dev,
+                            MMC5983MA_REG_CONTROL_1,
+                            MMC5983MA_CTRL1_SW_RST);
+
+  if (ret < 0)
+    {
+      syslog(LOG_ERR,
+             "[MMC5983MA] Software reset failed: %d\n",
+             ret);
+
+      return ret;
+    }
+
+  usleep(20000);
+
+  /**************************************************************************
+   * Read CONTROL_0
+   **************************************************************************/
+
+  ret = mmc5983ma_read_reg(dev,
+                           MMC5983MA_REG_CONTROL_0,
+                           &ctrl0);
+
+  if (ret < 0)
+    {
+      syslog(LOG_ERR,
+             "[MMC5983MA] CONTROL_0 read failed: %d\n",
+             ret);
+
+      return ret;
+    }
+
+  /**************************************************************************
+   * Read CONTROL_3
+   **************************************************************************/
+
+  ret = mmc5983ma_read_reg(dev,
+                           MMC5983MA_REG_CONTROL_3,
+                           &ctrl3);
+
+  if (ret < 0)
+    {
+      syslog(LOG_ERR,
+             "[MMC5983MA] CONTROL_3 read failed: %d\n",
+             ret);
+
+      return ret;
+    }
+
+  syslog(LOG_INFO,
+         "[MMC5983MA] CTRL0=0x%02X CTRL3=0x%02X\n",
+         ctrl0,
+         ctrl3);
+
+  /**************************************************************************
+   * Clear CONTROL_0
+   **************************************************************************/
+
+  ret = mmc5983ma_write_reg(dev,
+                            MMC5983MA_REG_CONTROL_0,
+                            0x00);
+
+  if (ret < 0)
+    {
+      syslog(LOG_ERR,
+             "[MMC5983MA] CONTROL_0 clear failed: %d\n",
+             ret);
+
+      return ret;
+    }
+
+  syslog(LOG_INFO,
+         "[MMC5983MA] INIT OK\n");
+
+  return 0;
+}
+
+/****************************************************************************
+ * Read magnetic field
+ ****************************************************************************/
+
+int mmc5983ma_read_mag(FAR mmc5983ma_dev_t *dev,
+                       FAR mmc5983ma_data_t *data)
+{
+  uint8_t tx[8];
+  uint8_t rx[8];
+
+  uint8_t status = 0;
+  uint8_t ctrl0_after = 0;
+
+  int ret;
+  int i;
+
+  if (dev == NULL || data == NULL)
+    {
+      return -EINVAL;
+    }
+
+  /**************************************************************************
+   * Start magnetic measurement
+   **************************************************************************/
+
+  ret = mmc5983ma_write_reg(dev,
+                            MMC5983MA_REG_CONTROL_0,
+                            MMC5983MA_CTRL0_TM_M);
+
+  if (ret < 0)
+    {
+      syslog(LOG_ERR,
+             "[MMC5983MA] TM_M write failed: %d\n",
+             ret);
+
+      return ret;
+    }
+
+  /**************************************************************************
+   * Read CONTROL_0 back
+   *
+   * This is diagnostic.
+   * We want to verify that TM_M was actually written.
+   **************************************************************************/
+
+  ret = mmc5983ma_read_reg(dev,
+                           MMC5983MA_REG_CONTROL_0,
+                           &ctrl0_after);
+
+  if (ret < 0)
+    {
+      syslog(LOG_ERR,
+             "[MMC5983MA] CTRL0 read after TM_M failed: %d\n",
+             ret);
+
+      return ret;
+    }
+
+  syslog(LOG_INFO,
+         "[MMC5983MA] CTRL0 after TM_M = 0x%02X\n",
+         ctrl0_after);
+
+  /**************************************************************************
+   * Wait for measurement complete
+   **************************************************************************/
+
+  for (i = 0; i < 100; i++)
+    {
+      ret = mmc5983ma_read_reg(dev,
+                               MMC5983MA_REG_STATUS,
+                               &status);
+
+      if (ret < 0)
+        {
+          syslog(LOG_ERR,
+                 "[MMC5983MA] STATUS read failed: %d\n",
+                 ret);
+
+          return ret;
+        }
+
+      if (status & MMC5983MA_STATUS_MEAS_M_DONE)
+        {
+          break;
+        }
+
+      usleep(1000);
+    }
+
+  syslog(LOG_INFO,
+         "[MMC5983MA] STATUS=0x%02X\n",
+         status);
+
+  /**************************************************************************
+   * Measurement timeout
+   **************************************************************************/
+
+  if (!(status & MMC5983MA_STATUS_MEAS_M_DONE))
+    {
+      syslog(LOG_ERR,
+             "[MMC5983MA] MEASUREMENT TIMEOUT\n");
+
+      return -ETIMEDOUT;
+    }
+
+  /**************************************************************************
+   * Read X, Y, Z magnetic data
+   *
+   * 8 bytes:
+   *
+   * Byte 0 = command/address
+   * Byte 1 = XOUT_0
+   * Byte 2 = XOUT_1
+   * Byte 3 = YOUT_0
+   * Byte 4 = YOUT_1
+   * Byte 5 = ZOUT_0
+   * Byte 6 = ZOUT_1
+   * Byte 7 = XYZOUT_2
+   **************************************************************************/
+
+  memset(tx, 0, sizeof(tx));
+  memset(rx, 0, sizeof(rx));
+
+  tx[0] = MMC5983MA_REG_XOUT_0 | 0x80;
+
+  SPI_LOCK(dev->spi, true);
+
+  SPI_SETMODE(dev->spi, SPIDEV_MODE0);
+  SPI_SETFREQUENCY(dev->spi, 1000000);
+
+  SPI_SELECT(dev->spi,
+             dev->dev_id,
+             true);
+
+  SPI_EXCHANGE(dev->spi,
+               tx,
+               rx,
+               8);
+
+  SPI_SELECT(dev->spi,
+             dev->dev_id,
+             false);
+
+  SPI_LOCK(dev->spi, false);
+
+  /**************************************************************************
+   * Print raw SPI bytes
+   **************************************************************************/
+
+  syslog(LOG_INFO,
+         "[MMC5983MA] RAW: "
+         "%02X %02X %02X %02X %02X %02X %02X\n",
+         rx[1],
+         rx[2],
+         rx[3],
+         rx[4],
+         rx[5],
+         rx[6],
+         rx[7]);
+
+  /**************************************************************************
+   * Convert 18-bit X
+   **************************************************************************/
+
+  data->raw_x =
+      ((uint32_t)rx[1] << 10) |
+      ((uint32_t)rx[2] << 2) |
+      ((uint32_t)(rx[7] >> 6) & 0x03);
+
+  /**************************************************************************
+   * Convert 18-bit Y
+   **************************************************************************/
+
+  data->raw_y =
+      ((uint32_t)rx[3] << 10) |
+      ((uint32_t)rx[4] << 2) |
+      ((uint32_t)(rx[7] >> 4) & 0x03);
+
+  /**************************************************************************
+   * Convert 18-bit Z
+   **************************************************************************/
+
+  data->raw_z =
+      ((uint32_t)rx[5] << 10) |
+      ((uint32_t)rx[6] << 2) |
+      ((uint32_t)(rx[7] >> 2) & 0x03);
+
+  /**************************************************************************
+   * Conversion to physical units
+   *
+   * Not calibrated yet.
+   **************************************************************************/
+
+  data->x_gauss = 0.0f;
+  data->y_gauss = 0.0f;
+  data->z_gauss = 0.0f;
+
+  data->x_uT = 0.0f;
+  data->y_uT = 0.0f;
+  data->z_uT = 0.0f;
+
+  /**************************************************************************
+   * Print decoded raw data
+   **************************************************************************/
+
+  syslog(LOG_INFO,
+         "[MMC5983MA] RAW X=%lu Y=%lu Z=%lu\n",
+         (unsigned long)data->raw_x,
+         (unsigned long)data->raw_y,
+         (unsigned long)data->raw_z);
+
+  return 0;
+}

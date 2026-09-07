@@ -1,0 +1,276 @@
+/****************************************************************************
+ * drivers/sensors/iam20380.c
+ *
+ * NuttX SPI driver for the IAM20380HT gyroscope.
+ * Ported from the STM32 HAL reference implementation (IAM_Sensor.c),
+ * keeping the same register map and init sequence that was already
+ * verified working on hardware (WHO_AM_I = 0x70).
+ ****************************************************************************/
+
+#include <nuttx/config.h>
+#include <nuttx/signal.h>
+#include <nuttx/spi/spi.h>
+#include <nuttx/kmalloc.h>
+#include <debug.h>
+#include <string.h>
+#include <errno.h>
+
+/****************************************************************************
+ * Register map (matches IAM_Sensor.h values used in the working HAL code)
+ ****************************************************************************/
+
+#define IAM20380_SMPLRT_DIV      0x19
+#define IAM20380_CONFIG          0x1A
+#define IAM20380_GYRO_CONFIG     0x1B
+#define IAM20380_GYRO_XOUT_H     0x43
+#define IAM20380_USER_CTRL       0x6A
+#define IAM20380_PWR_MGMT_1      0x6B
+#define IAM20380_WHO_AM_I        0x75
+
+#define IAM20380_WHO_AM_I_VAL    0x70   /* confirmed on this hardware */
+
+#define IAM20380_READ_CMD        0x80
+#define IAM20380_I2C_IF_DIS_BIT  0x10
+
+/* Gyro full scale range values (GYRO_CONFIG register) */
+
+#define GFSR_250DPS_VAL   0x00
+#define GFSR_500DPS_VAL   0x08
+#define GFSR_1000DPS_VAL  0x10
+#define GFSR_2000DPS_VAL  0x18
+
+enum iam20380_gfsr_e
+{
+  GFSR_250DPS = 0,
+  GFSR_500DPS,
+  GFSR_1000DPS,
+  GFSR_2000DPS
+};
+
+/****************************************************************************
+ * Private Types
+ ****************************************************************************/
+
+struct iam20380_dev_s
+{
+  FAR struct spi_dev_s *spi;
+  int spidevid;
+  float gscalefactor;
+};
+
+/****************************************************************************
+ * Low-level SPI helpers
+ * (equivalent of IAM_CS + HAL_SPI_TransmitReceive in the HAL code)
+ ****************************************************************************/
+
+static void iam20380_configspi(FAR struct spi_dev_s *spi)
+{
+  SPI_LOCK(spi, true);
+  SPI_SETMODE(spi, SPIDEV_MODE3);   /* CPOL=1, CPHA=1, same family as MPU/ICM */
+  SPI_SETBITS(spi, 8);
+  SPI_HWFEATURES(spi, 0);
+  SPI_SETFREQUENCY(spi, 1000000);   /* 1 MHz to start; can raise later */
+}
+
+static uint8_t iam20380_readreg(FAR struct iam20380_dev_s *priv,
+                                 uint8_t regaddr)
+{
+  uint8_t tx[2];
+  uint8_t rx[2];
+
+  tx[0] = regaddr | IAM20380_READ_CMD;
+  tx[1] = 0xFF; /* dummy byte to clock out the response */
+
+  iam20380_configspi(priv->spi);
+  SPI_SELECT(priv->spi, priv->spidevid, true);
+  SPI_EXCHANGE(priv->spi, tx, rx, 2);
+  SPI_SELECT(priv->spi, priv->spidevid, false);
+  SPI_LOCK(priv->spi, false);
+
+  return rx[1];
+}
+
+static void iam20380_writereg(FAR struct iam20380_dev_s *priv,
+                               uint8_t regaddr, uint8_t value)
+{
+  uint8_t tx[2];
+  uint8_t rx[2];
+
+  tx[0] = regaddr; /* MSB=0 -> write, same as HAL version */
+  tx[1] = value;
+
+  iam20380_configspi(priv->spi);
+  SPI_SELECT(priv->spi, priv->spidevid, true);
+  SPI_EXCHANGE(priv->spi, tx, rx, 2);
+  SPI_SELECT(priv->spi, priv->spidevid, false);
+  SPI_LOCK(priv->spi, false);
+
+   /* HAL_Delay(10) equivalent, matches original driver */
+}
+
+/* Burst read of 7 bytes starting at GYRO_XOUT_H, same as IAM20380_GetData() */
+
+static void iam20380_readgyroburst(FAR struct iam20380_dev_s *priv,
+                                    FAR uint8_t *rx7)
+{
+  uint8_t tx[7];
+
+  memset(tx, 0xFF, sizeof(tx));
+  tx[0] = IAM20380_GYRO_XOUT_H | IAM20380_READ_CMD;
+
+  iam20380_configspi(priv->spi);
+  SPI_SELECT(priv->spi, priv->spidevid, true);
+  SPI_EXCHANGE(priv->spi, tx, rx7, 7);
+  SPI_SELECT(priv->spi, priv->spidevid, false);
+  SPI_LOCK(priv->spi, false);
+}
+
+/****************************************************************************
+ * Public: WHO_AM_I check
+ ****************************************************************************/
+
+uint8_t iam20380_whoami(FAR struct iam20380_dev_s *priv)
+{
+  return iam20380_readreg(priv, IAM20380_WHO_AM_I);
+}
+
+/****************************************************************************
+ * Public: gyro full scale range (matches IAM_writeGyroFullScaleRange)
+ ****************************************************************************/
+
+static void iam20380_setgyrofsr(FAR struct iam20380_dev_s *priv, int gscale)
+{
+  uint8_t val;
+
+  switch (gscale)
+    {
+      case GFSR_250DPS:
+        priv->gscalefactor = 131.0f;
+        val = GFSR_250DPS_VAL;
+        break;
+
+      case GFSR_1000DPS:
+        priv->gscalefactor = 32.8f;
+        val = GFSR_1000DPS_VAL;
+        break;
+
+      case GFSR_2000DPS:
+        priv->gscalefactor = 16.4f;
+        val = GFSR_2000DPS_VAL;
+        break;
+
+      case GFSR_500DPS:
+      default:
+        priv->gscalefactor = 65.5f;
+        val = GFSR_500DPS_VAL;
+        break;
+    }
+
+  iam20380_writereg(priv, IAM20380_GYRO_CONFIG, val);
+}
+
+/****************************************************************************
+ * Public: init sequence
+ * (line-for-line equivalent of IAM_begin() from the working HAL driver)
+ ****************************************************************************/
+
+int iam20380_init(FAR struct iam20380_dev_s *priv)
+{
+  uint8_t whoami;
+
+  sinfo("IAM20380 initialization started\n");
+
+  /* 1. Soft reset */
+
+  iam20380_writereg(priv, IAM20380_PWR_MGMT_1, 0x81);
+  iam20380_delay(100);
+
+  /* 2. Disable I2C interface (SPI only) */
+
+  iam20380_writereg(priv, IAM20380_USER_CTRL, IAM20380_I2C_IF_DIS_BIT);
+  iam20380_delay(10);
+
+  /* 3. WHO_AM_I check */
+
+  whoami = iam20380_whoami(priv);
+  sinfo("WHO_AM_I = 0x%02X\n", whoami);
+
+  if (whoami != IAM20380_WHO_AM_I_VAL)
+    {
+      snerr("WHO_AM_I mismatch! got 0x%02X, expected 0x%02X\n",
+            whoami, IAM20380_WHO_AM_I_VAL);
+      return -ENODEV;
+    }
+
+  /* 4. Wake sensor, select PLL clock */
+
+  iam20380_writereg(priv, IAM20380_PWR_MGMT_1, 0x01);
+  iam20380_delay(10);
+
+  /* 5. DLPF = 20 Hz (CONFIG register) */
+
+  iam20380_writereg(priv, IAM20380_CONFIG, 0x04);
+
+  /* 6. Gyro full scale range */
+
+  iam20380_setgyrofsr(priv, GFSR_500DPS);
+
+  /* 7. Sample rate divider: 1000 / (9 + 1) = 100 Hz */
+
+  iam20380_writereg(priv, IAM20380_SMPLRT_DIV, 0x09);
+  iam20380_delay(10);
+
+  sinfo("IAM20380 initialization successful\n");
+  return OK;
+}
+
+/****************************************************************************
+ * Public: read gyro data, converted to raw int16 xyz
+ ****************************************************************************/
+
+void iam20380_getgyro(FAR struct iam20380_dev_s *priv,
+                      FAR int16_t *gx, FAR int16_t *gy, FAR int16_t *gz)
+{
+  uint8_t rx[7];
+
+  iam20380_readgyroburst(priv, rx);
+
+  /* rx[0] = response during address phase (ignored)
+   * rx[1..2] = X, rx[3..4] = Y, rx[5..6] = Z
+   */
+
+  *gx = (int16_t)(((uint16_t)rx[1] << 8) | rx[2]);
+  *gy = (int16_t)(((uint16_t)rx[3] << 8) | rx[4]);
+  *gz = (int16_t)(((uint16_t)rx[5] << 8) | rx[6]);
+}
+
+/****************************************************************************
+ * Public: register/create the device instance
+ ****************************************************************************/
+
+FAR struct iam20380_dev_s *iam20380_register(FAR struct spi_dev_s *spi,
+                                              int spidevid)
+{
+  FAR struct iam20380_dev_s *priv;
+
+  priv = (FAR struct iam20380_dev_s *)
+          kmm_zalloc(sizeof(struct iam20380_dev_s));
+
+  if (priv == NULL)
+    {
+      snerr("Failed to allocate iam20380_dev_s\n");
+      return NULL;
+    }
+
+  priv->spi = spi;
+  priv->spidevid = spidevid;
+  priv->gscalefactor = 65.5f;
+
+  if (iam20380_init(priv) < 0)
+    {
+      kmm_free(priv);
+      return NULL;
+    }
+
+  return priv;
+}

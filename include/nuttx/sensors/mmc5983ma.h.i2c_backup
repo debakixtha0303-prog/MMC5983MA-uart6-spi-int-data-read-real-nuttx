@@ -1,0 +1,65 @@
+/****************************************************************************
+ * include/nuttx/sensors/mmc5983ma.h
+ ****************************************************************************/
+
+#ifndef __INCLUDE_NUTTX_SENSORS_MMC5983MA_H
+#define __INCLUDE_NUTTX_SENSORS_MMC5983MA_H
+
+#include <nuttx/config.h>
+
+#include <stdint.h>
+#include <nuttx/compiler.h>
+#include <nuttx/i2c/i2c_master.h>
+
+/* MMC5983MA I2C Address */
+
+#define MMC5983MA_I2C_ADDR        0x30
+
+/* Output Registers */
+
+#define MMC5983MA_XOUT0           0x00
+#define MMC5983MA_XOUT1           0x01
+#define MMC5983MA_YOUT0           0x02
+#define MMC5983MA_YOUT1           0x03
+#define MMC5983MA_ZOUT0           0x04
+#define MMC5983MA_ZOUT1           0x05
+#define MMC5983MA_XYZOUT2         0x06
+
+/* Status Register */
+
+#define MMC5983MA_STATUS          0x08
+
+/* Control Register */
+
+#define MMC5983MA_CONTROL_0       0x09
+
+/* Product ID */
+
+#define MMC5983MA_PRODUCT_ID      0x2f
+#define MMC5983MA_PRODUCT_ID_VAL  0x30
+
+/* Control bits */
+
+#define MMC5983MA_TM_M            0x01
+
+/* Status bits */
+
+#define MMC5983MA_MEAS_M_DONE     0x01
+
+/****************************************************************************
+ * Public Function Prototypes
+ ****************************************************************************/
+
+int mmc5983ma_read_id(FAR struct i2c_master_s *i2c,
+                      FAR uint8_t *id);
+
+int mmc5983ma_initialize(FAR struct i2c_master_s *i2c);
+
+int mmc5983ma_measure(FAR struct i2c_master_s *i2c);
+
+int mmc5983ma_read_raw(FAR struct i2c_master_s *i2c,
+                       FAR uint32_t *x,
+                       FAR uint32_t *y,
+                       FAR uint32_t *z);
+
+#endif /* __INCLUDE_NUTTX_SENSORS_MMC5983MA_H */

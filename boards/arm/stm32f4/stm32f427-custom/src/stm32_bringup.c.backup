@@ -1,0 +1,204 @@
+/****************************************************************************
+ * boards/arm/stm32/stm32f427-custom/src/stm32_bringup.c
+ ****************************************************************************/
+
+#include <nuttx/config.h>
+
+#include <stdbool.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <errno.h>
+#include <time.h>
+
+#include <nuttx/debug.h>
+#include <nuttx/signal.h>
+#include <nuttx/kthread.h>
+#include <nuttx/spi/spi.h>
+#include <nuttx/sensors/mmc5983ma.h>
+
+#include "stm32.h"
+
+/****************************************************************************
+ * Private Functions
+ ****************************************************************************/
+
+#ifdef CONFIG_STM32_SPI2
+
+/****************************************************************************
+ * Name: mmc5983ma_reader_thread
+ *
+ * Description:
+ *   Continuously reads MMC5983MA magnetic field data.
+ *
+ ****************************************************************************/
+
+static int mmc5983ma_reader_thread(int argc, FAR char *argv[])
+{
+  FAR struct spi_dev_s *spi2;
+  mmc5983ma_dev_t mag_dev;
+  mmc5983ma_data_t mag_data;
+
+  int ret;
+
+  int32_t x_mg;
+  int32_t y_mg;
+  int32_t z_mg;
+
+  syslog(LOG_INFO,
+         "\n========================================\n");
+
+  syslog(LOG_INFO,
+         "[MMC5983MA] Continuous Reader Started\n");
+
+  syslog(LOG_INFO,
+         "========================================\n");
+
+  /**************************************************************************
+   * Initialize SPI2
+   **************************************************************************/
+
+  spi2 = stm32_spibus_initialize(2);
+
+  if (spi2 == NULL)
+    {
+      syslog(LOG_ERR,
+             "[MMC5983MA] Failed to initialize SPI2\n");
+
+      return -ENODEV;
+    }
+
+  syslog(LOG_INFO,
+         "[MMC5983MA] SPI2 initialized\n");
+
+  /**************************************************************************
+   * Initialize MMC5983MA
+   **************************************************************************/
+
+  ret = mmc5983ma_init(&mag_dev,
+                        spi2,
+                        0);
+
+  if (ret < 0)
+    {
+      syslog(LOG_ERR,
+             "[MMC5983MA] Initialization FAILED: %d\n",
+             ret);
+
+      return ret;
+    }
+
+  syslog(LOG_INFO,
+         "[MMC5983MA] Initialization SUCCESS\n");
+
+  /**************************************************************************
+   * Continuous measurement
+   **************************************************************************/
+
+  while (1)
+    {
+      ret = mmc5983ma_read_mag(&mag_dev,
+                               &mag_data);
+
+      if (ret < 0)
+        {
+          syslog(LOG_ERR,
+                 "[MMC5983MA] READ FAILED: %d\n",
+                 ret);
+        }
+      else
+        {
+          /*
+           * Convert Gauss float value to milli-Gauss.
+           *
+           * This avoids %f because NuttX printf/syslog
+           * may not have floating-point formatting enabled.
+           */
+
+          x_mg = (int32_t)(mag_data.x_gauss * 1000.0f);
+          y_mg = (int32_t)(mag_data.y_gauss * 1000.0f);
+          z_mg = (int32_t)(mag_data.z_gauss * 1000.0f);
+
+          syslog(LOG_INFO,
+                 "[MMC5983MA] X=%ld.%03ld mG | "
+                 "Y=%ld.%03ld mG | "
+                 "Z=%ld.%03ld mG\n",
+
+                 (long)(x_mg / 1000),
+                 (long)(x_mg < 0 ? -(x_mg % 1000) : x_mg % 1000),
+
+                 (long)(y_mg / 1000),
+                 (long)(y_mg < 0 ? -(y_mg % 1000) : y_mg % 1000),
+
+                 (long)(z_mg / 1000),
+                 (long)(z_mg < 0 ? -(z_mg % 1000) : z_mg % 1000));
+        }
+
+      /*
+       * 100 ms delay = 10 Hz output
+       */
+
+      {
+        struct timespec req =
+        {
+          .tv_sec = 0,
+          .tv_nsec = 100000000L
+        };
+
+        nxsig_nanosleep(&req, NULL);
+      }
+    }
+
+  return OK;
+}
+
+#endif /* CONFIG_STM32_SPI2 */
+
+/****************************************************************************
+ * Public Functions
+ ****************************************************************************/
+
+int stm32_bringup(void)
+{
+  int ret = OK;
+
+#ifdef CONFIG_STM32_SPI2
+
+  /**************************************************************************
+   * Start MMC5983MA continuous reader thread
+   **************************************************************************/
+
+  syslog(LOG_INFO,
+         "\n========================================\n");
+
+  syslog(LOG_INFO,
+         "       MMC5983MA SPI2 TEST\n");
+
+  syslog(LOG_INFO,
+         "========================================\n");
+
+  syslog(LOG_INFO,
+         "[MMC5983MA] Starting continuous reader...\n");
+
+  ret = kthread_create("mmc_reader",
+                       100,
+                       2048,
+                       mmc5983ma_reader_thread,
+                       NULL);
+
+  if (ret < 0)
+    {
+      syslog(LOG_ERR,
+             "[MMC5983MA] Failed to create reader thread: %d\n",
+             ret);
+
+      return ret;
+    }
+
+  syslog(LOG_INFO,
+         "[MMC5983MA] Reader thread started successfully\n");
+
+#endif /* CONFIG_STM32_SPI2 */
+
+  return ret;
+}
